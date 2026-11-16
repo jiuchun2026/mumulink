@@ -15,12 +15,13 @@
 """
 import io
 import json
+import os
 import subprocess
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-MUMU_MGR = r"D:\app\MuMuPlayer\nx_main\MuMuManager.exe"
+MUMU_MGR = os.environ.get("MUMU_MGR", r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\MuMuManager.exe")
 
 
 def load_all():
