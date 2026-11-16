@@ -1,0 +1,210 @@
+# MuMuLink · 用手机远控教室电脑里的 MuMu 模拟器
+
+> **声明**
+>
+> - **AI 制作**：本项目的代码、测试与文档由 AI 编码智能体（DeepSeek Harness）在人工提出需求、评审与验收下完成。
+> - **用到的开源项目**：[scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0，设备端直接使用其官方 `scrcpy-server` 5.0.1 二进制，客户端按其公开线协议独立实现）、[ScrcpyForAndroid](https://github.com/Miuzarte/ScrcpyForAndroid)（Apache-2.0，Android 端设计参考，未复制代码）、[ws-scrcpy](https://github.com/NetrisTV/ws-scrcpy)（MIT，早期可行性验证，未进入最终实现）；依赖 AndroidX / Jetpack Compose / Kotlin / OkHttp（均为 Apache-2.0）。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [licenses/](licenses)。
+> - **无关联声明**：本项目通过 MuMu 公开的 adb 接口与命令行工具与其交互，与网易 / MuMu 官方无隶属或背书关系；仓库不包含其任何文件。
+
+> 第一次用？直接看 **[使用教程 docs/USAGE.md](docs/USAGE.md)**。
+
+*校园网 · 局域网直连 · 手机原生触控 · 可调画质帧率 · DPI 自适应 · 悬浮球*
+
+MuMuLink 由两部分组成：
+
+| 组件 | 运行位置 | 作用 |
+|---|---|---|
+| **MuMuLink App**（`android/`，Kotlin + Compose） | 手机 | 解码视频、显示画面、把触控/按键转发给模拟器、悬浮球与设置 |
+| **MuMuLink 代理**（`pc/`，Node.js，零第三方依赖） | 教室电脑 | 用 adb 驱动 MuMu 里的 scrcpy-server，把 H.264 画面与触控通道通过局域网转给手机 |
+
+手机端**不需要 root、不需要开 USB 调试、不需要装任何 VNC/串流软件**；所有与 MuMu 打交道的脏活都在电脑侧的代理里完成。
+
+---
+
+## 1. 它是怎么工作的
+
+```
+┌──────────────┐   ① UDP 27181 广播发现 / 手动填 IP
+│  手机 App     │────────────────────────────────┐
+│  (校园网 WLAN)│                                ▼
+│              │   ② HTTP 27180 (配对/会话/画质/DPI)
+│              │───────────────────────────▶ ┌──────────────────┐
+│              │   ③ TCP 27182 视频 (H.264)   │ 教室电脑 Node 代理 │
+│              │───────────────────────────▶ │  adb.exe          │
+│              │   ④ TCP 27183 控制 (scrcpy)  │   ├ forward 28182  │
+└──────────────┘───────────────────────────▶ └─────────┬────────┘
+                                                        │ 127.0.0.1:16384 (MuMu 只监听本机)
+                                                        ▼
+                                              ┌──────────────────┐
+                                              │ MuMu 实例 0      │
+                                              │ scrcpy-server    │
+                                              │ (app_process)    │
+                                              └──────────────────┘
+```
+
+- MuMu 的 adb 端口只绑定 `127.0.0.1`，局域网里的手机本来永远够不到它；代理在电脑上开一个局域网端口，替手机完成 adb 转发、scrcpy 启动与画面中继。
+- 视频通道是 **scrcpy 官方 5.0.1 协议**：设备侧硬编码 H.264，手机侧 MediaCodec 硬解，直接渲染到 Surface；控制通道就是 scrcpy 的 control socket，所以“操作逻辑与手机相同”是协议层保证的——触摸、滑动、多指、长按、滚轮、键盘、返回/主页/多任务、亮屏熄屏全都走原生 `MotionEvent`/`KeyEvent` 注入。
+- 画面尺寸：scrcpy 按 `max_size` 下采样后推送，App 端按视频真实宽高比做 aspect-fit / fill 布局，**不拉伸**；旋转或改分辨率时服务端会中途重发 session meta，App 会重建解码器并重新适配。
+- DPI 适配：`fit` 模式把模拟器的 `wm size`/`wm density` 临时改成与手机屏幕一致（退出/断开自动恢复），`match` 模式按手机长宽比等比设定——这样模拟器里的 App 会按手机的逻辑尺寸布局，而不是按平板的 1440×2560。
+
+---
+
+## 2. 五分钟跑起来
+
+### 2.1 电脑（教室那台）
+
+1. 确认 MuMu 已启动，且实例 0 正在运行（代理默认连 `127.0.0.1:16384`）。
+2. 双击 `pc/start-agent.cmd`（或 `node agent.js`）。
+   首次运行会生成 `pc/config.json`，控制台会打印 **配对码**、本机局域网 IP、以及可访问的地址。
+3. 如果 Windows 弹防火墙询问，选“允许访问”（本机已有 `node.exe` 的入站放行规则时不会弹）。
+4. 保持这个窗口不关；代理会在控制台实时打印会话日志，配对页也在 `http://<电脑IP>:27180/`。
+5. 想开机自启：右键管理员运行 `pc/install-autostart.cmd`（实际只写当前用户的 Startup 目录，不需要管理员），卸载用 `pc/uninstall-autostart.cmd`。
+
+> 电脑关机/休眠会中断串流。教室电脑建议在“电源选项”里把睡眠关掉（不需要管理员权限的“当前用户”设置即可）。
+
+### 2.2 手机
+
+1. 安装 `MuMuLink-1.0.0.apk`（首次安装需允许“安装未知来源应用”）。
+2. 手机连**同一个校园网 WLAN**（和电脑同一个 SSID / 同一网段）。宿舍能连上教室电脑的前提就是这个——vivo 办公套件能连，说明这条二层通路是通的。
+3. 打开 App：
+   - 正常情况下几秒内会在“发现设备”里出现电脑（UDP 广播 + 主动探测双保险）；
+   - 没出现就点“手动连接”，输入电脑 IP（配对页上有）和配对码。
+4. 连上后即出现模拟器画面，手指就是模拟器的触摸。**悬浮球**（默认停靠右侧）点一下展开：画质、帧率、DPI、显示器模式、统计信息、隐藏。
+
+### 2.3 建议的画质档位（校园网 WiFi）
+
+| 档位 | 分辨率上限 | 帧率 | 码率 | 适用 |
+|---|---|---|---|---|
+| 流畅 | 720p | 30 | 1.5 Mbps | 宿舍信号弱、AP 拥塞、省流量 |
+| 均衡（默认） | 1080p | 60 | 4 Mbps | 大多数场景，文字清晰、动作跟手 |
+| 高清 | 1440p | 60 | 8 Mbps | 同 AP、信号好，看细节 |
+| 极至 | 1920p | 60 | 12 Mbps | 5GHz / 有线 AP，延迟敏感度低 |
+
+四档只是预设；设置面板里还能分别改**帧率**（30/45/60/90/120）、**分辨率上限**（≤720/≤1080/≤1440/≤1920）和**码率**（2/4/6/8/12 Mbps）。改任一项都会让代理用新参数重启会话（scrcpy 的码率/分辨率不能在运行中直接改，重启约 1.5 秒，App 会自动重连并保持当前画面区域）。
+
+悬浮球里还有“自适应”：App 会持续观测解码帧率、端到端抖动与丢帧，自动在相邻档位间升降（抖动大就降码率/分辨率，稳定 3 秒再升一档）。
+
+---
+
+## 3. 校园网部署要点（宿舍 ↔ 教室）
+
+1. **同一网段**：手机与电脑拿到同一 WLAN 的地址（例如都是 `192.168.10.x/22`）。若学院 AP 给学生网和办公网分了不同 VLAN，则二层不通，需换到同一个 SSID（这一步只能靠现场确认；vivo 办公套件能连说明当前 SSID 是通的）。
+2. **AP 隔离（客户端隔离）**：部分校园 AP 会禁止同一 AP 下的终端互访。表现为“能发现但连不上/握手超时”。排查见第 6 节。
+3. **不要依赖 127.0.0.1**：手机上连的是 `192.168.1.10:27182`，走局域网；电脑本机测试才用 `127.0.0.1`。代理对视频/控制端口的鉴权握手对两者一致。
+4. **IP 会变**：校园网 DHCP 租期短，电脑 IP 可能换。App 有发现机制；也可以手动改 IP。代理启动时会把当前 IP 打印出来。
+5. **代理自启**：把 `pc/start-agent.cmd` 的快捷方式放进
+   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
+   （当前用户启动目录，不需要管理员权限），登录即自动启动。
+6. **安全**：代理默认 `requirePairing: true`，HTTP 接口要 `X-MuMuLink-Token`，视频/控制端口在裸字节前要先过 `MUMULINK1 <token>` 握手；未配对/错的连接会被立即关闭。控制台里能看到被拒绝的连接。建议不要把配对码发到群里。
+
+---
+
+## 4. 目录结构
+
+```
+mumu-remote/
+├─ android/                  # MuMuLink App（Kotlin + Compose）
+│  └─ app/src/main/java/com/mumulink/remote/
+│     ├─ MainActivity.kt
+│     ├─ model/Models.kt     # 共享数据模型（与 SPEC 4.2 一致）
+│     ├─ net/                # 发现、HTTP 客户端、视频/控制 socket、帧解析
+│     ├─ core/               # MediaCodec 解码、输入映射、控制消息序列化、会话状态机
+│     └─ ui/                 # 连接页、串流页、悬浮球、设置面板、主题
+├─ pc/                       # MuMuLink 代理（Node.js）
+│  ├─ agent.js               # HTTP API + 视频/控制中继 + 生命周期
+│  ├─ lib/{adb,scrcpy,display,discovery,page,config,logger}.js
+│  └─ start-agent.cmd
+├─ docs/SPEC.md              # 协议与接口的单一事实来源
+├─ docs/ATTRIBUTION.md       # 开源许可与借鉴说明
+├─ tools/                    # 构建/探测/自测脚本
+└─ evidence/                 # 测试证据（截图、报告）
+```
+
+---
+
+## 5. 从源码构建
+
+```bash
+# App（需要 JDK 17 + Android SDK 36；本机路径见 android/local.properties）
+cd mumu-remote/android
+export JAVA_HOME="D:/app/Java/jdk-17.0.2"
+./gradlew assembleDebug          # 产物 app/build/outputs/apk/debug/app-debug.apk
+
+# 代理（Node 18+，无依赖）
+cd mumu-remote/pc
+node agent.js --help
+```
+
+代理的配置文件 `pc/config.json` 首次运行自动生成；字段与默认值见 `docs/SPEC.md` §3.2。
+
+---
+
+## 6. 排障
+
+| 现象 | 原因与处理 |
+|---|---|
+| App 里看不到设备 | ① 手机和电脑不在同一 WLAN / 不在同网段；② 校园 AP 开了客户端隔离（换 SSID 或让电脑连手机热点）；③ 电脑防火墙拦了 27180/27181（允许 `node.exe` 入站）；④ 手动填 IP 试。 |
+| 发现得到、连接超时 | 客户端隔离或代理未启动；看代理控制台是否打印“拒绝/超时”。手机浏览器打开 `http://<电脑IP>:27180/` 若能出配对页，说明 HTTP 通、问题在 TCP 端口策略。 |
+| 连上后黑屏 | MuMu 实例没在跑 / adb 断了（代理会自动重连并重建会话）；看代理日志里的 scrcpy 启动参数与报错。 |
+| 画面卡顿、花屏 | 降一档画质；检查是否走了 2.4GHz 拥塞信道；`max_size` 越高对解码与带宽要求越高。花屏多半是 `max_fps` 过高导致丢帧策略生效，降到 30 试试。 |
+| 触摸位置偏 | 恢复 DPI：悬浮球 → DPI → 跟随模拟器；或断开重连让它重新下发 `wm size`。旋转后 App 会自动按新 session meta 重算比例。 |
+| 电脑重启后连不上 | 代理没自启：把启动快捷方式放进 Startup 目录；或到教室手动双击。 |
+| 声音 | 当前版本只串视频（`audio=false`）：MuMu 的声音仍在电脑上，手机端不出声。 |
+
+---
+
+## 7. 致谢与许可
+
+本项目用到/借鉴了以下开源项目，详见 [`docs/ATTRIBUTION.md`](docs/ATTRIBUTION.md)：
+
+- [Genymobile/scrcpy](https://github.com/Genymobile/scrcpy) — Apache-2.0，设备端 `scrcpy-server` 与控制/视频协议（官方 5.0.1 二进制随代理分发）。
+- [Miuzarte/ScrcpyForAndroid](https://github.com/Miuzarte/ScrcpyForAndroid) — Apache-2.0，Android 端解码/输入/会话组织的参考实现。
+- [NetrisTV/ws-scrcpy](https://github.com/NetrisTV/ws-scrcpy) — MIT，早期可行性验证阶段的参考（未用于最终实现）。
+- AndroidX / Jetpack Compose / OkHttp — Apache-2.0。
+
+MuMuLink 自身代码以 MIT 许可发布（见 `LICENSE`）。
+
+## 串流时的界面（沉浸式）
+
+- 进入串流后隐藏状态栏/导航栏，只保留画面和可拖动的悬浮球；**点屏幕只透传给被控端，不会弹出任何 App 界面**。
+- 悬浮球单击展开菜单：画质 / 适配(DPI) / 返回 / 主页 / 旋转 / **断开** / 隐藏；长按球可隐藏，右下角小胶囊可恢复。
+- 想断开串流：球菜单点「断开」→ 确认；或按系统返回键。
+
+## 跨网段（宿舍 ↔ 教室）
+
+同一个校园网 SSID 也可能按楼宇分到不同网段（例如教学楼 `192.168.10.x/22`、宿舍楼 `192.168.40.x`）。
+UDP 广播不会跨路由器转发，所以「扫描局域网」在另一个网段里天然搜不到电脑。校园网内部路由通常是通的
+（能 ping 通即可），因此：
+
+- **手动/最近连接**：在 App 首页点「最近连接」里的 `192.168.1.10`（或手动填这个 IP + 端口 27180）即可直连；
+- **v1.0.1 起**：扫描时除了广播，还会对「最近连接过的电脑」做**单播探测**，跨网段也能被发现；
+- 手机浏览器打开 `http://<电脑IP>:27180/` 能看到配对页，说明这条链路通；打不开则说明该网段被隔离，需要 USB/中转方案。
+- 手机可直接从 `http://<电脑IP>:27180/apk` 下载最新安装包。
+
+## 触控突然失灵（画面正常、按键可用、点屏幕没反应）
+
+这是被控端（模拟器）输入子系统里残留了「按下未抬起」的指针导致的，不是网络问题。
+触发场景：手指按着时控制连接断掉（切后台、Wi-Fi 抖动、App 被系统杀、会话被重启），
+被控端只收到 DOWN、收不到对应的 UP，之后所有注入触摸都会被 InputDispatcher 以
+`Inconsistent event / Invalid DOWN event - pointers already down` 丢弃。
+
+- **v1.0.2 已修**：断开/重连前会把仍按着的手指逐根补发 UP；正常退出不会再留下残留。
+- **已经卡死时**：只能重启被控端才能清空。三个办法任选：
+  1. 电脑浏览器打开 `http://<电脑IP>:27180/`，点「重启模拟器（触控失灵时用）」；
+  2. 手机 App 里断开连接后，在电脑上重启 MuMu 实例；
+  3. 命令行：`mumu-cli.exe control -v 0 restart`（新版 MuMu 没有 MuMuManager.exe 了）。
+- 重启后等 30–60 秒再连即可，模拟器里的应用会被关闭。
+
+## 致谢 / Credits
+
+本项目建立在 [scrcpy](https://github.com/Genymobile/scrcpy)（Apache-2.0）之上：
+设备端直接使用其官方 `scrcpy-server` 5.0.1，客户端按其公开线协议独立实现。
+Android 端的设计参考了 [ScrcpyForAndroid](https://github.com/Miuzarte/ScrcpyForAndroid)（Apache-2.0，未复制代码），
+早期可行性验证使用过 [ws-scrcpy](https://github.com/NetrisTV/ws-scrcpy)（MIT，未进入最终实现）。
+详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [licenses/](licenses)。
+
+本项目与网易 / MuMu 无隶属关系，不包含其任何文件。
+
+## 许可证
+
+MuMuLink 自身代码采用 MIT，见 [LICENSE](LICENSE)。

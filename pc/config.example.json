@@ -1,0 +1,16 @@
+{
+  "name": "My PC",
+  "httpPort": 27180,
+  "udpPort": 27181,
+  "videoPort": 27182,
+  "controlPort": 27183,
+  "adbForwardPort": 28182,
+  "adb": "adb.exe",
+  "device": "127.0.0.1:16384",
+  "scrcpyJar": "tools/scrcpy-server.jar",
+  "scrcpyJarMd5": "55a1ef0a811f1cb0d417084b70e0a630",
+  "deviceJarPath": "/sdcard/mumulink/scrcpy.bin",
+  "pairingCode": "000000",
+  "token": "",
+  "requirePairing": true
+}

@@ -1,0 +1,16 @@
+MuMuLink uses the scrcpy device server and wire protocol.
+
+scrcpy
+Copyright (C) 2018 Genymobile
+Copyright (C) 2018-2025 Romain Vimont
+
+Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE-2.0.txt).
+Project: https://github.com/Genymobile/scrcpy
+
+Distributed artifact: tools/scrcpy-server.jar
+Upstream release: scrcpy v5.0.1, asset scrcpy-server-v5.0.1
+SHA-256 / MD5 are pinned in the agent configuration (scrcpyJarMd5) and verified
+before every push to the device. The jar itself is unmodified.
+
+MuMuLink's own Kotlin/JavaScript code is an independent implementation of the
+client side of this protocol and is not derived from scrcpy's source code.

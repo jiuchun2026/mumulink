@@ -1,0 +1,19 @@
+# 本地配置与凭据
+pc/config.json
+pc/*.log
+*.log
+
+# Node 运行时（不入库，启动脚本会用系统 node）
+pc/node.exe
+
+# 构建产物
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+
+# 测试与证据（可能含个人屏幕内容）
+evidence/
+dist/
+tools/e2e/output/

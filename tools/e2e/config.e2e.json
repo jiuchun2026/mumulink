@@ -1,0 +1,17 @@
+{
+  "name": "E2E测试代理",
+  "httpPort": 27380,
+  "udpPort": 27381,
+  "videoPort": 27382,
+  "controlPort": 27383,
+  "adbForwardPort": 28382,
+  "adb": "adb.exe",
+  "device": "127.0.0.1:16384",
+  "scrcpyJar": "tools/scrcpy-server.jar",
+  "scrcpyJarMd5": "55a1ef0a811f1cb0d417084b70e0a630",
+  "deviceJarPath": "/sdcard/mumulink/scrcpy.bin",
+  "mumuManager": "C:/Program Files/Netease/MuMuPlayer/nx_main/MuMuManager.exe",
+  "pairingCode": "112233",
+  "token": "",
+  "requirePairing": true
+}
