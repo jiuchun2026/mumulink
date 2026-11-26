@@ -10,8 +10,18 @@ const DEFAULT_QUALITY = { maxSize: 1080, maxFps: 60, bitRate: 4000000 };
 const SCRCPY_VERSION = '5.0.1';
 const REMOTE_JAR = '/sdcard/mumulink/scrcpy.bin';
 const EXPECTED_MD5 = '55a1ef0a811f1cb0d417084b70e0a630';
-const SERVER_ARGS_TAIL = `log_level=${process.env.MUMULINK_SCRCPY_LOG_LEVEL || 'info'} video=true audio=false control=true tunnel_forward=true ` +
-  'send_device_meta=false send_dummy_byte=false send_stream_meta=true send_frame_meta=true';
+function configAudioEnabled(cfg) {
+  const a = cfg && cfg.audio;
+  if (a === false) return false;
+  if (a && typeof a === 'object' && a.enabled === false) return false;
+  return true;
+}
+
+function serverArgsTail(audioEnabled) {
+  return `log_level=${process.env.MUMULINK_SCRCPY_LOG_LEVEL || 'info'} video=true audio=${audioEnabled ? 'true' : 'false'} ` +
+    'audio_codec=raw control=true tunnel_forward=true ' +
+    'send_device_meta=false send_dummy_byte=false send_stream_meta=true send_frame_meta=true';
+}
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -279,9 +289,14 @@ class SessionManager {
     this.quality = Object.assign({}, DEFAULT_QUALITY);
     this.displaySpec = { mode: 'fit' };
     this.videoClient = null;
+    this.audioClient = null;
     this.controlClient = null;
     this.videoUpstream = null;
+    this.audioUpstream = null;
     this.controlUpstream = null;
+    this.audioEnabled = true;
+    this.audioBytes = 0;
+    this.audioPackets = 0;
     this.videoStats = null;
     this.statsTimer = null;
     this.lastError = null;
@@ -303,15 +318,19 @@ class SessionManager {
       quality: Object.assign({}, this.quality),
       display: Object.assign({}, this.displaySpec),
       videoConnected: !!this.videoClient,
+      audioConnected: !!this.audioClient,
+      audioEnabled: !!this.audioEnabled,
       controlConnected: !!this.controlClient,
+      audioBytes: this.audioBytes,
+      audioPackets: this.audioPackets,
       scid: this.scidHex,
       lastError: this.lastError,
       stats: this.videoStats ? this.videoStats.snapshot() : null
     };
   }
 
-  async start({ quality, display } = {}) {
-    return this._serial(() => this._start(quality, display));
+  async start({ quality, display, audio } = {}) {
+    return this._serial(() => this._start(quality, display, audio));
   }
 
   async stop(reason = '手动停止') {
@@ -329,7 +348,7 @@ class SessionManager {
     return this.start({ quality: normalized, display: this.displaySpec });
   }
 
-  async _start(quality, display) {
+  async _start(quality, display, audio) {
     if (this.busy) fail('SCRCPY_BUSY', '会话正在启动或停止中，请稍后重试');
     this.busy = true;
     try {
@@ -340,6 +359,11 @@ class SessionManager {
       this.lastError = null;
       const q = normalizeQuality(quality, this.quality);
       const dspec = normalizeDisplay(display);
+      this.audioEnabled = (audio === undefined || audio === null)
+        ? configAudioEnabled(this.config)
+        : !!audio;
+      this.audioBytes = 0;
+      this.audioPackets = 0;
       this.logger.info(`会话启动：quality=${q.maxSize}@${q.maxFps} ${q.bitRate}bps display=${dspec.mode}${dspec.mode === 'match' ? ` ${dspec.width}x${dspec.height}@${dspec.density}` : ''}`);
 
       const dev = this.adb.ensureDevice();
@@ -366,7 +390,7 @@ class SessionManager {
 
       this.running = true;
       this.startedAt = Date.now();
-      this.logger.info(`scrcpy 会话已就绪（scid=${scidHex}），等待 App 连接 videoPort=${this.config.videoPort} controlPort=${this.config.controlPort}`);
+      this.logger.info(`scrcpy 会话已就绪（scid=${scidHex}），等待 App 连接 videoPort=${this.config.videoPort} audioPort=${this.config.audioPort}${this.audioEnabled ? '' : '（音频关闭）'} controlPort=${this.config.controlPort}`);
 
       const cur = this.adb.getDisplay();
       this.displayApplied = this.display.overrideApplied;
@@ -374,6 +398,8 @@ class SessionManager {
         deviceW: appliedDisplay.width,
         deviceH: appliedDisplay.height,
         videoPort: this.config.videoPort,
+        audioPort: this.config.audioPort,
+        audioEnabled: this.audioEnabled,
         controlPort: this.config.controlPort,
         quality: Object.assign({}, q),
         display: appliedDisplay,
@@ -448,7 +474,7 @@ class SessionManager {
 
   _buildServerCommand(scidHex) {
     const q = this.quality;
-    return `CLASSPATH=${this.remoteJar || this.config.deviceJarPath || REMOTE_JAR} app_process / com.genymobile.scrcpy.Server ${SCRCPY_VERSION} ${SERVER_ARGS_TAIL} ` +
+    return `CLASSPATH=${this.remoteJar || this.config.deviceJarPath || REMOTE_JAR} app_process / com.genymobile.scrcpy.Server ${SCRCPY_VERSION} ${serverArgsTail(this.audioEnabled)} ` +
       `scid=${scidHex} max_size=${q.maxSize} max_fps=${q.maxFps} video_bit_rate=${q.bitRate} ` +
       'stay_awake=true cleanup=true power_on=false clipboard_autosync=false';
   }
@@ -574,13 +600,18 @@ class SessionManager {
   }
 
   _destroyClients() {
-    for (const s of [this.videoClient, this.controlClient, this.videoUpstream, this.controlUpstream]) {
+    for (const s of [this.videoClient, this.audioClient, this.controlClient, this.videoUpstream, this.audioUpstream, this.controlUpstream]) {
       if (s) { try { s.destroy(); } catch (_) { /* ignore */ } }
     }
     this.videoClient = null;
+    this.audioClient = null;
     this.controlClient = null;
     this.videoUpstream = null;
+    this.audioUpstream = null;
     this.controlUpstream = null;
+    this.audioEnabled = true;
+    this.audioBytes = 0;
+    this.audioPackets = 0;
   }
 
   async _killServer() {
@@ -701,6 +732,95 @@ class SessionManager {
     upstream.pipe(socket);
     // 手机 → 设备：丢弃（scrcpy 视频 socket 不使用反向数据）
     socket.on('data', () => {});
+    if (pending.length) {
+      try { upstream.write(pending); } catch (_) { /* ignore */ }
+    }
+    socket.resume();
+  }
+
+  async handleAudioConnection(socket) {
+    socket.setNoDelay(true);
+    const reader = handshakeReader(socket);
+    const { line, err } = await reader.promise;
+    if (err) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'BAD_REQUEST', err === 'TIMEOUT' ? '握手超时（3s）' : '握手读取失败');
+      return;
+    }
+    const m = line.match(/^MUMULINK1\s+(.*)$/);
+    if (!m) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'BAD_REQUEST', '握手格式错误');
+      return;
+    }
+    if (!this._authToken(m[1].trim())) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'BAD_TOKEN', '配对令牌无效');
+      return;
+    }
+    if (!this.running) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'NO_SESSION', '代理当前没有运行中的会话');
+      return;
+    }
+    if (!this.audioEnabled) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'AUDIO_DISABLED', '本会话未启用音频，请在 App 设置里打开音频后重连');
+      return;
+    }
+    if (!this.videoUpstream || !this.videoClient) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'VIDEO_NOT_READY', '视频连接尚未建立');
+      return;
+    }
+    if (this.audioClient) {
+      reader.takePending();
+      this._rejectHandshake(socket, 'SESSION_BUSY', '已有音频连接');
+      return;
+    }
+    const pending = reader.takePending();
+    this.audioClient = socket;
+    this.logger.info(`接受音频连接：${socket.remoteAddress}:${socket.remotePort}`);
+    socket.on('close', () => {
+      if (this.audioClient === socket) {
+        this.audioClient = null;
+        this.logger.info('音频连接已断开（视频与控制不受影响）');
+      }
+    });
+    socket.on('error', (e) => this.logger.warn(`音频连接错误：${e.message}`));
+
+    let upstream;
+    try {
+      upstream = await connectLocalRetry(this.forwardPort, 6000);
+    } catch (e) {
+      this.logger.error(`连接 scrcpy 音频上游失败：${e.message}`);
+      this._rejectHandshake(socket, 'SCRCPY_START_FAILED', '连接设备音频流失败');
+      if (this.audioClient === socket) this.audioClient = null;
+      return;
+    }
+    if (this.audioClient !== socket) {
+      try { upstream.destroy(); } catch (_) { /* ignore */ }
+      return;
+    }
+    this.audioUpstream = upstream;
+    this.logger.info('scrcpy 音频上游已连接');
+    socket.write('MUMULINK1 OK\n');
+    this.logger.info('音频握手成功，开始转发 PCM（48kHz/立体声/16bit）');
+
+    upstream.on('data', (chunk) => {
+      this.audioBytes += chunk.length;
+      this.audioPackets += 1;
+    });
+    upstream.on('close', () => {
+      if (this.audioUpstream === upstream) {
+        this.audioUpstream = null;
+        this.logger.warn('scrcpy 音频上游已关闭');
+      }
+    });
+    upstream.on('error', (e) => this.logger.warn(`音频上游错误：${e.message}`));
+
+    upstream.pipe(socket, { end: false });
+    socket.on('close', () => { try { upstream.destroy(); } catch (_) { /* ignore */ } });
     if (pending.length) {
       try { upstream.write(pending); } catch (_) { /* ignore */ }
     }

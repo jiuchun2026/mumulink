@@ -32,11 +32,11 @@ MuMuLink 的 PC 端代理：把 MuMu 模拟器里的 Android 屏幕通过 scrcpy
   "name": "客厅电脑",
   "httpPort": 27180, "udpPort": 27181, "videoPort": 27182, "controlPort": 27183,
   "adbForwardPort": 28182,
-  "adb": "adb.exe",
+  "adb": "D:/app/Android/Sdk/platform-tools/adb.exe",
   "device": "127.0.0.1:16384",
   "scrcpyJar": "tools/scrcpy-server.jar",
   "deviceJarPath": "/sdcard/mumulink/scrcpy.bin",
-  "pairingCode": "000000",
+  "pairingCode": "004944",
   "token": "",
   "requirePairing": true
 }
@@ -55,7 +55,7 @@ MuMuLink 的 PC 端代理：把 MuMu 模拟器里的 Android 屏幕通过 scrcpy
 
 ### 重要：不要用 127.0.0.1 测试视频/控制端口
 
-代理的 adb forward 会占用本机 `127.0.0.1:28182`，但 LAN 视频/控制监听在 `0.0.0.0:27182/27183`。Windows 上从**本机**连 `127.0.0.1:27182` 可能被其他 forward/规则抢占；自测请用 LAN IP（如 `192.168.1.10:27182`）。手机走 LAN IP，不受影响。
+代理的 adb forward 会占用本机 `127.0.0.1:28182`，但 LAN 视频/控制监听在 `0.0.0.0:27182/27183`。Windows 上从**本机**连 `127.0.0.1:27182` 可能被其他 forward/规则抢占；自测请用 LAN IP（如 `10.130.90.1:27182`）。手机走 LAN IP，不受影响。
 
 ## 自测
 
@@ -88,7 +88,7 @@ TCP 握手：客户端发 `MUMULINK1 <token>\n`，成功回 `MUMULINK1 OK\n` 后
 ## 校园网连不上？先看防火墙的“网络配置文件”
 
 现象：手机和电脑在同一网段（都能 ping 通/ARP 有记录），但手机访问 `http://<PC IP>:27180` 超时。
-原因：Windows 防火墙规则是**按程序路径 + 网络配置文件**生效的。`node.exe` 的放行规则只在 **Public（公用）** 生效，而校园网 Wi-Fi 常被 Windows 判为 **Private（专用）**，于是入站被拦。
+原因：Windows 防火墙规则是**按程序路径 + 网络配置文件**生效的。`D:\app\new folder\node.exe` 的放行规则只在 **Public（公用）** 生效，而校园网 Wi-Fi 常被 Windows 判为 **Private（专用）**，于是入站被拦。
 
 解决（无需管理员）：
 1. 直接运行本目录的 `start-agent.cmd`。它会优先使用 `%LOCALAPPDATA%\MuMuLink\node.exe`，没有就把系统 node 复制到那里再运行。

@@ -5,6 +5,7 @@ const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
 const { Logger } = require('./lib/logger');
@@ -65,6 +66,7 @@ discovery.setPaired(!!config.token);
 
 let httpServer = null;
 let videoServer = null;
+let audioServer = null;
 let controlServer = null;
 const preHandshakeSockets = new Set();
 let shuttingDown = false;
@@ -272,8 +274,8 @@ async function handleDeviceRestart(req, res) {
 function findMuMuManager() {
   const candidates = [
     config.mumuManager,
-    'C:/Program Files/Netease/MuMuPlayer/nx_main/mumu-cli.exe',
-    'C:/Program Files/Netease/MuMuPlayer/nx_main/MuMuManager.exe',
+    'D:/app/MuMuPlayer/nx_main/mumu-cli.exe',
+    'D:/app/MuMuPlayer/nx_main/MuMuManager.exe',
     'C:/Program Files/Netease/MuMuPlayer-12.0/shell/MuMuManager.exe',
     'C:/Program Files/Netease/MuMuPlayerGlobal-12.0/shell/MuMuManager.exe'
   ].filter(Boolean);
@@ -283,12 +285,89 @@ function findMuMuManager() {
   return null;
 }
 
+function localAddresses() {
+  const out = [];
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const it of ifaces[name] || []) {
+      if (it && it.family === 'IPv4' && !it.internal) out.push({ name, address: it.address, netmask: it.netmask });
+    }
+  }
+  return out;
+}
+
+function md5File(file) {
+  try {
+    const h = crypto.createHash('md5');
+    h.update(fs.readFileSync(file));
+    return h.digest('hex');
+  } catch (e) {
+    return null;
+  }
+}
+
+function portListening(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', (e) => resolve(e.code === 'EADDRINUSE' ? true : false));
+    srv.once('listening', () => srv.close(() => resolve(false)));
+    srv.listen(port, '0.0.0.0');
+  });
+}
+
+function gamePreset() {
+  const g = config.gameMode || {};
+  return {
+    maxSize: Number(g.maxSize) || 1080,
+    maxFps: Number(g.maxFps) || 90,
+    bitRate: Number(g.bitRate) || 12000000
+  };
+}
+
+async function handleDeps(req, res) {
+  const items = [];
+  // node
+  items.push({ id: 'node', label: 'Node.js 运行时', ok: true, detail: process.version + '（' + process.execPath + '）' });
+  // adb
+  let adbVer = '';
+  let adbOk = false;
+  try {
+    const r = adb.raw(['version'], { timeout: 6000, log: false });
+    adbOk = !!r.ok;
+    adbVer = (r.stdout || '').split(/\r?\n/)[0] || '';
+  } catch (_) { /* ignore */ }
+  items.push({ id: 'adb', label: 'adb（Android 调试桥）', ok: adbOk, detail: adbOk ? adbVer : `未找到或不可执行：${config.adb}`, path: config.adb });
+  // mumu manager
+  const mgr = findMuMuManager();
+  items.push({ id: 'mumu', label: 'MuMu 管理器（重启模拟器用）', ok: !!mgr, detail: mgr || '未找到 mumu-cli.exe / MuMuManager.exe，可在设置里手动填写路径', path: mgr || '' });
+  // jar
+  const jar = localJar || findScrcpyJar(config, REPO_ROOT);
+  const md5 = jar ? md5File(jar) : null;
+  const jarOk = !!jar && (!config.scrcpyJarMd5 || md5 === config.scrcpyJarMd5);
+  items.push({ id: 'jar', label: 'scrcpy-server（设备端）', ok: jarOk, detail: jar ? `${jar}（md5 ${md5 || '?'}${jarOk ? '' : '，与期望不符'}）` : '未找到 tools/scrcpy-server.jar', path: jar || '' });
+  // device
+  let devOk = false; let devDetail = '';
+  try { const d = adb.ensureDevice(); devOk = true; devDetail = `${d.model} Android ${d.android}（${d.serial}）`; }
+  catch (e) { devDetail = e.message; }
+  items.push({ id: 'device', label: 'MuMu 模拟器设备', ok: devOk, detail: devDetail });
+  // ports
+  for (const [key, port] of [['httpPort', config.httpPort], ['videoPort', config.videoPort], ['audioPort', config.audioPort], ['controlPort', config.controlPort]]) {
+    let used = false;
+    try { used = await portListening(port); } catch (_) { /* ignore */ }
+    // 正在监听说明是本代理自身（或冲突），对依赖检查来说都算“端口被占”，但代理自己监听是正常
+    items.push({ id: 'port-' + key, label: `端口 ${port}`, ok: true, detail: used ? '已被监听（若为其他程序占用会启动失败）' : '空闲' });
+  }
+  // 音频能力
+  items.push({ id: 'audio', label: '音频转发（scrcpy raw PCM）', ok: true, detail: '48kHz / 立体声 / 16bit；需要 Android 11+（当前 ' + (getDeviceStatus().android || '?') + '）' });
+  sendJson(res, 200, { ok: true, items });
+}
+
 async function route(req, res) {
   const u = new URL(req.url, 'http://localhost');
   const pathname = u.pathname.replace(/\/+$/, '') || '/';
   const method = req.method || 'GET';
 
-  if (pathname === '/' && method === 'GET') {
+  if ((pathname === '/' || pathname === '/dashboard') && method === 'GET') {
     const html = renderPage(config, { agentVersion: AGENT_VERSION });
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
@@ -355,15 +434,164 @@ async function route(req, res) {
       agentVersion: AGENT_VERSION,
       paired: !!config.token,
       device,
+      mode: config.mode || 'normal',
+      ports: {
+        http: config.httpPort, udp: config.udpPort,
+        video: config.videoPort, audio: config.audioPort, control: config.controlPort,
+        adbForward: config.adbForwardPort
+      },
+      audio: { enabled: !(config.audio && config.audio.enabled === false) },
       session: {
         running: s.running,
         quality: s.quality,
         display: s.display,
         videoConnected: s.videoConnected,
+        audioConnected: s.audioConnected,
+        audioEnabled: s.audioEnabled,
+        audioBytes: s.audioBytes,
         controlConnected: s.controlConnected,
-        lastError: s.lastError
+        lastError: s.lastError,
+        stats: s.stats
       }
     });
+    return;
+  }
+
+  if (pathname === '/api/status' && method === 'GET') {
+    requireAuth(req);
+    const s = session.getPublicInfo();
+    let device = null;
+    try { device = getDeviceStatus(true); } catch (_) { /* ignore */ }
+    sendJson(res, 200, {
+      ok: true,
+      name: config.name,
+      agentVersion: AGENT_VERSION,
+      pid: process.pid,
+      uptimeSec: Math.round(process.uptime()),
+      node: process.version,
+      platform: process.platform,
+      configPath,
+      mode: config.mode || 'normal',
+      ports: {
+        http: config.httpPort, udp: config.udpPort,
+        video: config.videoPort, audio: config.audioPort, control: config.controlPort,
+        adbForward: config.adbForwardPort
+      },
+      audio: { enabled: !(config.audio && config.audio.enabled === false) },
+      gameMode: gamePreset(),
+      device,
+      session: s,
+      addresses: localAddresses()
+    });
+    return;
+  }
+
+  if (pathname === '/api/mode' && method === 'POST') {
+    requireAuth(req);
+    const body = await readJson(req);
+    const mode = body.mode === 'game' ? 'game' : 'normal';
+    config.mode = mode;
+    try { saveConfig(configPath, config); } catch (_) { /* ignore */ }
+    let restarted = false;
+    if (mode === 'game') {
+      const q = gamePreset();
+      logger.info(`游戏模式：${q.maxSize}@${q.maxFps} ${q.bitRate}bps，音频开启`);
+      if (session.isRunning()) {
+        await session.start({ quality: q, display: session.getPublicInfo().display, audio: true });
+        restarted = true;
+      } else {
+        await session.setQuality(q);
+      }
+    } else {
+      logger.info('游戏模式已关闭（恢复手动画质）');
+      if (session.isRunning()) { restarted = false; }
+    }
+    invalidateDeviceCache();
+    sendJson(res, 200, { ok: true, mode, restarted, quality: session.getPublicInfo().quality });
+    return;
+  }
+
+  if (pathname === '/api/deps' && method === 'GET') {
+    requireAuth(req);
+    await handleDeps(req, res);
+    return;
+  }
+
+  if (pathname === '/api/diagnostics' && method === 'GET') {
+    requireAuth(req);
+    let forwards = [];
+    try { forwards = adb.raw(['forward', '--list'], { timeout: 6000, log: false }).stdout.split(/\r?\n/).filter(Boolean); } catch (_) { /* ignore */ }
+    let wm = '';
+    try { wm = adb.raw(['-s', adb.serial, 'shell', 'wm size; wm density'], { timeout: 8000, log: false }).stdout.trim(); } catch (_) { /* ignore */ }
+    sendJson(res, 200, {
+      ok: true,
+      lastError: session.getPublicInfo().lastError,
+      logs: logger.tail(200),
+      forwards,
+      display: wm,
+      scid: session.getPublicInfo().scid,
+      addresses: localAddresses()
+    });
+    return;
+  }
+
+  if (pathname === '/api/settings' && method === 'GET') {
+    requireAuth(req);
+    sendJson(res, 200, {
+      ok: true,
+      settings: {
+        name: config.name,
+        pairingCode: config.pairingCode,
+        adb: config.adb,
+        device: config.device,
+        mumuManager: config.mumuManager,
+        httpPort: config.httpPort,
+        udpPort: config.udpPort,
+        videoPort: config.videoPort,
+        audioPort: config.audioPort,
+        controlPort: config.controlPort,
+        adbForwardPort: config.adbForwardPort,
+        audioEnabled: !(config.audio && config.audio.enabled === false),
+        gameMode: gamePreset(),
+        mode: config.mode || 'normal',
+        requirePairing: !!config.requirePairing
+      },
+      configPath
+    });
+    return;
+  }
+
+  if (pathname === '/api/settings' && method === 'POST') {
+    requireAuth(req);
+    const body = await readJson(req);
+    const portKeys = ['httpPort', 'udpPort', 'videoPort', 'audioPort', 'controlPort', 'adbForwardPort'];
+    let needsRestart = false;
+    for (const k of ['name', 'adb', 'device', 'mumuManager', 'pairingCode', 'scrcpyJar', 'deviceJarPath']) {
+      if (typeof body[k] === 'string' && body[k].trim()) config[k] = body[k].trim();
+    }
+    for (const k of portKeys) {
+      if (body[k] !== undefined) {
+        const v = Number(body[k]);
+        if (!Number.isInteger(v) || v < 1 || v > 65535) fail('BAD_REQUEST', `端口 ${k} 非法：${body[k]}`);
+        if (v !== config[k]) { config[k] = v; needsRestart = true; }
+      }
+    }
+    if (body.audioEnabled !== undefined) {
+      const en = !!body.audioEnabled;
+      config.audio = Object.assign({}, config.audio, { enabled: en });
+      needsRestart = true;
+    }
+    if (body.gameMode && typeof body.gameMode === 'object') {
+      config.gameMode = {
+        maxSize: Number(body.gameMode.maxSize) || gamePreset().maxSize,
+        maxFps: Number(body.gameMode.maxFps) || gamePreset().maxFps,
+        bitRate: Number(body.gameMode.bitRate) || gamePreset().bitRate
+      };
+    }
+    if (body.mode === 'game' || body.mode === 'normal') { config.mode = body.mode; }
+    saveConfig(configPath, config);
+    logger.info(`设置已保存${needsRestart ? '（部分设置需重启代理生效）' : ''}`);
+    sendJson(res, 200, { ok: true, needsRestart, configPath });
     return;
   }
 
@@ -385,7 +613,7 @@ async function route(req, res) {
   if (pathname === '/api/session/start' && method === 'POST') {
     requireAuth(req);
     const body = await readJson(req);
-    const r = await session.start({ quality: body.quality, display: body.display });
+    const r = await session.start({ quality: body.quality, display: body.display, audio: body.audio });
     invalidateDeviceCache();
     // 刷新为应用 wm 之后的生效值，避免 App 启动后立刻 hello 命中旧缓存
     let effective = null;
@@ -395,6 +623,8 @@ async function route(req, res) {
       deviceW: effective ? effective.width : r.deviceW,
       deviceH: effective ? effective.height : r.deviceH,
       videoPort: r.videoPort,
+      audioPort: r.audioPort,
+      audioEnabled: r.audioEnabled,
       controlPort: r.controlPort,
       quality: r.quality,
       display: r.display
@@ -521,11 +751,12 @@ function scheduleAgentRestart() {
 function closeServers() {
   for (const s of preHandshakeSockets) { try { s.destroy(); } catch (_) { /* ignore */ } }
   preHandshakeSockets.clear();
-  for (const srv of [videoServer, controlServer]) {
+  for (const srv of [videoServer, audioServer, controlServer]) {
     if (srv) { try { srv.close(); } catch (_) { /* ignore */ } }
     if (srv && srv.closeAllConnections) { try { srv.closeAllConnections(); } catch (_) { /* ignore */ } }
   }
   videoServer = null;
+  audioServer = null;
   controlServer = null;
   if (httpServer) {
     try { httpServer.close(); } catch (_) { /* ignore */ }
@@ -565,7 +796,7 @@ async function main() {
   logger.info('==============================================');
   logger.info(`MuMuLink PC Agent v${AGENT_VERSION}（node ${process.version}，${process.platform}）`);
   logger.info(`配置：${configPath}（${config.name}）`);
-  logger.info(`端口：HTTP ${config.httpPort} / UDP ${config.udpPort} / video ${config.videoPort} / control ${config.controlPort}`);
+  logger.info(`端口：HTTP ${config.httpPort} / UDP ${config.udpPort} / video ${config.videoPort} / audio ${config.audioPort} / control ${config.controlPort}`);
   logger.info(`adb：${config.adb}`);
   logger.info(`设备：${config.device}，jar：${localJar || '未找到'}`);
   logger.info(`scrcpy 设备端 jar：${config.deviceJarPath}`);
@@ -616,6 +847,26 @@ async function main() {
     process.exit(1);
   });
 
+  audioServer = net.createServer((socket) => {
+    socket.setNoDelay(true);
+    socket.on('error', (e) => logger.warn(`音频连接 socket 错误：${e.message}`));
+    preHandshakeSockets.add(socket);
+    socket.once('close', () => preHandshakeSockets.delete(socket));
+    session.handleAudioConnection(socket).catch((e) => {
+      logger.warn(`音频连接处理异常：${e.message}`);
+      try { socket.destroy(); } catch (_) { /* ignore */ }
+    });
+  });
+  audioServer.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') {
+      if (process.env.MUMULINK_RESTART_CHILD === '1') return;
+      console.error(`[FATAL] 音频端口 ${config.audioPort} 已被占用。请修改 config.json 的 audioPort 后重启。`);
+      process.exit(1);
+    }
+    console.error(`[FATAL] 音频服务错误：${e.message}`);
+    process.exit(1);
+  });
+
   controlServer = net.createServer((socket) => {
     socket.setNoDelay(true);
     socket.on('error', (e) => logger.warn(`控制连接 socket 错误：${e.message}`));
@@ -663,6 +914,9 @@ async function main() {
   }
   await bind(httpServer, config.httpPort, 'HTTP');
   await bind(videoServer, config.videoPort, '视频');
+  if (!(config.audio && config.audio.enabled === false)) {
+    await bind(audioServer, config.audioPort, '音频');
+  }
   await bind(controlServer, config.controlPort, '控制');
 
   logger.info(`HTTP 已监听 0.0.0.0:${config.httpPort}，TCP 视频 ${config.videoPort} / 控制 ${config.controlPort}`);

@@ -21,7 +21,7 @@ Android 手机 App「MuMuLink」通过**局域网**远程操作本机 MuMu 模�
         └──UDP 发现(27181 broadcast)──▶
 ```
 
-理由：MuMu 的 adb 端口仅绑 127.0.0.1，且机器无管理员权限（不能 netsh portproxy / 改防火墙），但 `node.exe` 已有 Public 全端口入站放行规则。App 端不实现 ADB 协议（避开认证/推 jar/shell v2），只做 scrcpy 客户端，最薄最稳。
+理由：MuMu 的 adb 端口仅绑 127.0.0.1，且机器无管理员权限（不能 netsh portproxy / 改防火墙），但 `D:\app\new folder\node.exe` 已有 Public 全端口入站放行规则。App 端不实现 ADB 协议（避开认证/推 jar/shell v2），只做 scrcpy 客户端，最薄最稳。
 
 App 端绝对不做的事：不连 adb、不推文件、不执行 shell。所有设备侧操作走代理 HTTP。
 
@@ -39,7 +39,7 @@ App 端绝对不做的事：不连 adb、不推文件、不执行 shell。所有
 {
   "httpPort": 27180, "udpPort": 27181, "videoPort": 27182, "controlPort": 27183,
   "adbForwardPort": 28182,
-  "adb": "adb.exe",
+  "adb": "D:/app/Android/Sdk/platform-tools/adb.exe",
   "device": "127.0.0.1:16384",
   "scrcpyJar": "tools/scrcpy-server.jar",
   "scrcpyJarMd5": "55a1ef0a811f1cb0d417084b70e0a630",
@@ -99,7 +99,7 @@ adb shell "CLASSPATH=/sdcard/mumulink/scrcpy.bin app_process / com.genymobile.sc
 ### 3.7 UDP 发现（27181，固定载荷）
 代理每 2s 向 `255.255.255.255:27181` 和每个网卡子网广播地址各发一次 UTF-8 JSON；同时监听 27181，收到 App 发来的文本 `MUMULINK_DISCOVER` 时立即单播回同一载荷。
 ```json
-{"magic":"MUMULINK","v":1,"name":"客厅电脑","host":"192.168.1.10","httpPort":27180,"videoPort":27182,"controlPort":27183,"paired":false,"agentVersion":"1.0.0","ips":["192.168.1.10"]}
+{"magic":"MUMULINK","v":1,"name":"客厅电脑","host":"10.130.90.1","httpPort":27180,"videoPort":27182,"controlPort":27183,"paired":false,"agentVersion":"1.0.0","ips":["10.130.90.1"]}
 ```
 `ips` 为可选字段（本机所有 IPv4）。App 只接受 `magic=="MUMULINK" && v==1`，按 `host` 去重；2s 收不到可发一次 `MUMULINK_DISCOVER` 再等 300ms。
 
