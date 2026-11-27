@@ -17,7 +17,7 @@ function renderPage(config, opts = {}) {
     audioPort: config.audioPort,
     controlPort: config.controlPort,
     udpPort: config.udpPort,
-    pairingCode: config.pairingCode,
+    pairingCode: opts.pairingCode === undefined ? config.pairingCode : opts.pairingCode,
     agentVersion: opts.agentVersion || '1.1.0',
     mode: config.mode || 'normal'
   };
@@ -120,6 +120,8 @@ function token() { return localStorage.getItem(TOKEN_KEY) || ''; }
 function hdrs(extra) {
   return Object.assign({ 'Content-Type': 'application/json' }, token() ? { 'X-MuMuLink-Token': token() } : {}, extra || {});
 }
+const IS_LOCAL = ['127.0.0.1', 'localhost', '::1', '[::1]'].indexOf(location.hostname) >= 0;
+
 async function api(method, path, body) {
   const r = await fetch(path, { method, headers: hdrs(), body: body === undefined ? undefined : JSON.stringify(body) });
   let data = null; try { data = await r.json(); } catch (_) { data = null; }
@@ -143,15 +145,29 @@ function renderPairing(msg) {
   $('tabs').style.display = 'none';
   ['session','settings','diag'].forEach((t) => { $('tab-' + t).style.display = 'none'; });
   $('hName').textContent = BOOT.name + ' · 需要配对';
-  $('hSub').textContent = '在下方输入代理控制台显示的 6 位配对码';
+  $('hSub').textContent = IS_LOCAL ? '正在为本机自动配对…（通常无需手动输入）' : '在下方输入代理控制台显示的 6 位配对码';
   $('tab-overview').innerHTML = \`
     <div class="card pairbox">
       <h2>配对这台电脑</h2>
-      <div class="hintline">配对码显示在电脑代理窗口，或本页刷新前的配对卡片上。</div>
+      <div class="hintline">配对码显示在代理窗口标题/日志里（“配对码：xxxxxx”），也在下面的概览卡片里；电脑本机打开控制台会自动配对。</div>
       <input id="pairIn" inputmode="numeric" maxlength="6" placeholder="6 位数字" style="text-align:center;font-size:22px;letter-spacing:6px">
       <div class="btns"><button class="primary" id="pairBtn" style="flex:1">配对并进入控制台</button></div>
       <div class="hintline" id="pairMsg">\${msg || ''}</div>
     </div>\`;
+  if (IS_LOCAL) {
+    // 本机打开控制台：直接向本机代理要一个 token，不打扰用户找配对码
+    (async () => {
+      try {
+        const r = await fetch('/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.hint || j.error || '自动配对失败');
+        localStorage.setItem(TOKEN_KEY, j.token);
+        location.reload();
+      } catch (e) {
+        $('pairMsg').textContent = '本机自动配对失败：' + e.message + '（可手输配对码）';
+      }
+    })();
+  }
   $('pairBtn').onclick = async () => {
     const code = ($('pairIn').value || '').trim();
     if (!/^\\d{6}$/.test(code)) { $('pairMsg').textContent = '请输入 6 位数字配对码'; return; }

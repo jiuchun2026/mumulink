@@ -205,9 +205,45 @@ function requireAuth(req) {
 
 const pairAttempts = { count: 0, firstAt: 0 };
 
+function probeExistingAgent(port, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/api/hello', method: 'GET', timeout: timeoutMs }, (res) => {
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try {
+          const j = JSON.parse(buf);
+          resolve(j && j.magic === 'MUMULINK' ? j : null);
+        } catch (_) { resolve(null); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
 async function handlePair(req, res) {
   const body = await readJson(req);
   const code = String(body.code == null ? '' : body.code).trim();
+  const ra = String(req.socket.remoteAddress || '');
+  const isLoopback = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+  if (!code && isLoopback) {
+    // 本机（控制台窗口 / GUI）访问免配对：能坐在电脑前打开本机页面，本身就等于持有这台电脑
+    let created = false;
+    if (!config.token) {
+      config.token = randomToken();
+      saveConfig(configPath, config);
+      created = true;
+      discovery.setPaired(true);
+      logger.info('本机控制台自动配对：已生成 token 并保存');
+    } else {
+      logger.info('本机控制台自动配对：返回已有 token');
+    }
+    sendJson(res, 200, { ok: true, token: config.token, newToken: created, local: true });
+    return;
+  }
   const now = Date.now();
   if (now - pairAttempts.firstAt > 60000) { pairAttempts.count = 0; pairAttempts.firstAt = now; }
   if (pairAttempts.count >= 5) {
@@ -368,7 +404,10 @@ async function route(req, res) {
   const method = req.method || 'GET';
 
   if ((pathname === '/' || pathname === '/dashboard') && method === 'GET') {
-    const html = renderPage(config, { agentVersion: AGENT_VERSION });
+    const ra = String(req.socket.remoteAddress || '');
+    const isLocal = ra === '127.0.0.1' || ra === '::1' || ra === '::ffff:127.0.0.1';
+    // 配对码只在「本机打开」时随页面下发：局域网访客看不到它，避免被顺手配对
+    const html = renderPage(config, { agentVersion: AGENT_VERSION, pairingCode: isLocal ? config.pairingCode : '' });
     res.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Content-Length': Buffer.byteLength(html),
@@ -800,9 +839,18 @@ async function main() {
   logger.info(`adb：${config.adb}`);
   logger.info(`设备：${config.device}，jar：${localJar || '未找到'}`);
   logger.info(`scrcpy 设备端 jar：${config.deviceJarPath}`);
+  logger.info(`配对码：${config.pairingCode}（手机首次连接时输入一次；电脑本机打开控制台免配对）`);
   const adbVer = adb.raw(['version'], { timeout: 8000, log: false });
   if (adbVer.ok) logger.info(`adb 版本：${adbVer.stdout.split(/\r?\n/)[0] || '未知'}`);
   else logger.warn(`adb 不可用：${(adbVer.stderr || adbVer.error && adbVer.error.message || 'unknown').trim()}`);
+
+  // 先看端口上是否已有一个 MuMuLink 代理：有就直接退出，避免刷屏报错
+  const already = await probeExistingAgent(config.httpPort);
+  if (already) {
+    logger.info(`已有 MuMuLink 代理在运行（${config.httpPort}，name=${already.name || '?'}），本实例退出`);
+    console.log(`[INFO] 已有 MuMuLink 代理在运行，直接打开控制台：http://127.0.0.1:${config.httpPort}/dashboard`);
+    process.exit(3);
+  }
 
   httpServer = http.createServer((req, res) => {
     if (shuttingDown) {      sendJson(res, 503, { ok: false, error: 'SHUTTING_DOWN', message: '代理正在退出' });
@@ -820,8 +868,17 @@ async function main() {
   httpServer.on('error', (e) => {
     if (e.code === 'EADDRINUSE') {
       if (process.env.MUMULINK_RESTART_CHILD === '1') return; // bind() 负责重试
-      console.error(`[FATAL] HTTP 端口 ${config.httpPort} 已被占用。请关闭占用程序（可能是另一个代理实例），或修改 config.json 的 httpPort 后重启。`);
-      process.exit(1);
+      // 端口被占：先确认是不是另一个 MuMuLink 代理，如果是就不必报错刷屏
+      probeExistingAgent(config.httpPort).then((info) => {
+        if (info) {
+          console.log(`[INFO] 已有 MuMuLink 代理在运行（${config.httpPort}，name=${info.name || '?'}）。本实例退出，直接使用已运行的那个即可。`);
+          console.log(`[INFO] 打开控制台：http://127.0.0.1:${config.httpPort}/dashboard`);
+          process.exit(3);
+        }
+        console.error(`[FATAL] HTTP 端口 ${config.httpPort} 已被占用（不是 MuMuLink 代理）。请关闭占用程序，或修改 config.json 的 httpPort 后重启。`);
+        process.exit(1);
+      });
+      return;
     }
     console.error(`[FATAL] HTTP 服务错误：${e.message}`);
     process.exit(1);
@@ -912,7 +969,21 @@ async function main() {
       }
     }
   }
-  await bind(httpServer, config.httpPort, 'HTTP');
+  try {
+    await bind(httpServer, config.httpPort, 'HTTP');
+  } catch (e) {
+    if (e && e.code === 'EADDRINUSE') {
+      const info = await probeExistingAgent(config.httpPort);
+      if (info) {
+        logger.info(`已有 MuMuLink 代理在运行（${config.httpPort}），本实例退出`);
+        console.log(`[INFO] 已有 MuMuLink 代理在运行，直接打开控制台：http://127.0.0.1:${config.httpPort}/dashboard`);
+        process.exit(3);
+      }
+      console.error(`[FATAL] HTTP 端口 ${config.httpPort} 被其他程序占用，请改 config.json 的 httpPort 或关闭占用程序。`);
+      process.exit(1);
+    }
+    throw e;
+  }
   await bind(videoServer, config.videoPort, '视频');
   if (!(config.audio && config.audio.enabled === false)) {
     await bind(audioServer, config.audioPort, '音频');
